@@ -473,6 +473,41 @@ fn constant_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     )(i)
 }
 
+fn type_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, TypeDef, E> {
+    preceded(
+        spc,
+        alt((
+            map(
+                delimited(tag("typedef"), declaration, tag(";")),
+                |declaration| TypeDef::TypeDef { declaration },
+            ),
+            map(
+                delimited(tag("enum"), tuple((identifier, enum_body)), tag(";")),
+                |(identifier, enum_body)| TypeDef::Enum {
+                    identifier,
+                    enum_body,
+                },
+            ),
+            map(
+                delimited(tag("struct"), tuple((identifier, struct_body)), tag(";")),
+                |(identifier, struct_body)| TypeDef::Struct {
+                    identifier,
+                    struct_body,
+                },
+            ),
+            map(
+                delimited(tag("union"), tuple((identifier, union_body)), tag(";")),
+                |(identifier, union_body)| TypeDef::Union {
+                    identifier,
+                    union_body,
+                },
+            ),
+        )),
+    )(i)
+}
+
 #[cfg(test)]
 mod test {
     use nom::{error::ErrorKind, Err};
@@ -780,5 +815,80 @@ mod test {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn test_type_def() {
+        assert_eq!(
+            type_def::<(_, ErrorKind)>("enum cool_enum { A = 1, B = 2 };"),
+            Ok((
+                "",
+                TypeDef::Enum {
+                    identifier: Identifier("cool_enum"),
+                    enum_body: EnumBody {
+                        variants: vec![
+                            (Identifier("A"), Value::Constant(Constant(1))),
+                            (Identifier("B"), Value::Constant(Constant(2)))
+                        ]
+                    }
+                }
+            ))
+        );
+        assert_eq!(
+            type_def::<(_, ErrorKind)>("struct cool_struct { int a; hyper b; };"),
+            Ok((
+                "",
+                TypeDef::Struct {
+                    identifier: Identifier("cool_struct"),
+                    struct_body: StructBody {
+                        declarations: vec![
+                            Declaration::Regular {
+                                type_specifier: TypeSpecifier::Int { unsigned: false },
+                                identifier: Identifier("a"),
+                            },
+                            Declaration::Regular {
+                                type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                                identifier: Identifier("b"),
+                            },
+                        ]
+                    }
+                }
+            ))
+        );
+        assert_eq!(
+                type_def::<(_, ErrorKind)>("union cool_union switch ( int my_msg ) { case 1 : int thing; case 2 : hyper other_thing; default:string fallback<>;};"),
+                Ok((
+                    "",
+                    TypeDef::Union {
+                        identifier: Identifier("cool_union"),
+                        union_body: UnionBody {
+                            switch_declaration: Declaration::Regular {
+                                type_specifier: TypeSpecifier::Int { unsigned: false },
+                                identifier: Identifier("my_msg"),
+                            },
+                            case_specs: vec![
+                                CaseDef {
+                                    value: Value::Constant(Constant(1)),
+                                    declaration: Declaration::Regular {
+                                        type_specifier: TypeSpecifier::Int { unsigned: false },
+                                        identifier: Identifier("thing"),
+                                    },
+                                },
+                                CaseDef {
+                                    value: Value::Constant(Constant(2)),
+                                    declaration: Declaration::Regular {
+                                        type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                                        identifier: Identifier("other_thing"),
+                                    },
+                                }
+                            ],
+                            default_declaration: Some(Declaration::String {
+                                identifier: Identifier("fallback"),
+                                value: None,
+                            }),
+                        },
+                    },
+                )),
+            );
     }
 }
