@@ -3,8 +3,8 @@ use nom::bytes::complete::{tag, take_until, take_while};
 use nom::character::complete::{alpha1, alphanumeric1, one_of};
 use nom::combinator::{map, opt, recognize, value as nom_value};
 use nom::error::{ContextError, ParseError};
-use nom::multi::{many0_count, many1};
-use nom::sequence::{delimited, pair, preceded, tuple};
+use nom::multi::{many0, many0_count, many1, separated_list1};
+use nom::sequence::{delimited, pair, preceded, separated_pair, tuple};
 use nom::IResult;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -75,7 +75,7 @@ pub struct EnumTypeSpec<'a> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EnumBody<'a> {
-    pub variants: Vec<(Identifier<'a>, Declaration<'a>)>,
+    pub variants: Vec<(Identifier<'a>, Value<'a>)>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -142,11 +142,31 @@ pub struct Specification<'a> {
     pub definitions: Vec<Definition<'a>>,
 }
 
+fn space<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, &'a str, E> {
+    take_while(|c| " \t\r\n".contains(c))(i)
+}
+
+fn comment<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, &'a str, E> {
+    recognize(tuple((tag("/*"), take_until("*/"), tag("*/"))))(i)
+}
+
+fn spc<'a, E: ParseError<&'a str> + ContextError<&'a str>>(i: &'a str) -> IResult<&'a str, (), E> {
+    // TODO: Figure out a more elegant way to handle comments and whitespace.
+    nom_value(
+        (),
+        tuple((space, many0(delimited(space, comment, space)), space)),
+    )(i)
+}
+
 fn declaration<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, Declaration, E> {
     preceded(
-        space,
+        spc,
         alt((
             map(tag("void"), |_| Declaration::Void),
             declaration_opaque_fixed_array,
@@ -178,7 +198,7 @@ fn declaration_fixed_array<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         tuple((
             type_specifier,
             identifier,
-            delimited(preceded(space, tag("[")), value, preceded(space, tag("]"))),
+            delimited(preceded(spc, tag("[")), value, preceded(spc, tag("]"))),
         )),
         |(t, i, v)| Declaration::FixedArray {
             type_specifier: t,
@@ -195,11 +215,7 @@ fn declaration_variable_array<'a, E: ParseError<&'a str> + ContextError<&'a str>
         tuple((
             type_specifier,
             identifier,
-            delimited(
-                preceded(space, tag("<")),
-                opt(value),
-                preceded(space, tag(">")),
-            ),
+            delimited(preceded(spc, tag("<")), opt(value), preceded(spc, tag(">"))),
         )),
         |(t, i, v)| Declaration::VariableArray {
             type_specifier: t,
@@ -215,7 +231,7 @@ fn declaration_opaque_fixed_array<'a, E: ParseError<&'a str> + ContextError<&'a 
     map(
         tuple((
             preceded(tag("opaque"), identifier),
-            delimited(preceded(space, tag("[")), value, preceded(space, tag("]"))),
+            delimited(preceded(spc, tag("[")), value, preceded(spc, tag("]"))),
         )),
         |(i, v)| Declaration::OpaqueFixedArray {
             identifier: i,
@@ -230,11 +246,7 @@ fn declaration_opaque_variable_array<'a, E: ParseError<&'a str> + ContextError<&
     map(
         tuple((
             preceded(tag("opaque"), identifier),
-            delimited(
-                preceded(space, tag("<")),
-                opt(value),
-                preceded(space, tag(">")),
-            ),
+            delimited(preceded(spc, tag("<")), opt(value), preceded(spc, tag(">"))),
         )),
         |(i, v)| Declaration::OpaqueVariableArray {
             identifier: i,
@@ -249,11 +261,7 @@ fn declaration_string<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     map(
         tuple((
             preceded(tag("string"), identifier),
-            delimited(
-                preceded(space, tag("<")),
-                opt(value),
-                preceded(space, tag(">")),
-            ),
+            delimited(preceded(spc, tag("<")), opt(value), preceded(spc, tag(">"))),
         )),
         |(i, v)| Declaration::String {
             identifier: i,
@@ -268,7 +276,7 @@ fn declaration_pointer<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     map(
         tuple((
             type_specifier,
-            preceded(preceded(space, tag("*")), identifier),
+            preceded(preceded(spc, tag("*")), identifier),
         )),
         |(t, i)| Declaration::Pointer {
             type_specifier: t,
@@ -281,7 +289,7 @@ fn value<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, Value, E> {
     preceded(
-        space,
+        spc,
         alt((
             map(constant, Value::Constant),
             map(identifier, Value::Identifier),
@@ -293,7 +301,7 @@ fn constant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, Constant, E> {
     preceded(
-        space,
+        spc,
         map(
             recognize(preceded(opt(tag("-")), many1(one_of("0123456789")))),
             |v: &str| Constant(v.parse().expect("failed to parse constant")),
@@ -305,7 +313,7 @@ fn identifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, Identifier, E> {
     preceded(
-        space,
+        spc,
         map(
             recognize(pair(alpha1, many0_count(alt((alphanumeric1, tag("_")))))),
             |ident| Identifier(ident),
@@ -317,13 +325,13 @@ fn type_specifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, TypeSpecifier, E> {
     preceded(
-        space,
+        spc,
         alt((
-            map(tuple(((tag("unsigned")), space, tag("int"))), |_| {
+            map(tuple(((tag("unsigned")), spc, tag("int"))), |_| {
                 TypeSpecifier::Int { unsigned: true }
             }),
             map(tag("int"), |_| TypeSpecifier::Int { unsigned: false }),
-            map(tuple(((tag("unsigned")), space, tag("hyper"))), |_| {
+            map(tuple(((tag("unsigned")), spc, tag("hyper"))), |_| {
                 TypeSpecifier::Hyper { unsigned: true }
             }),
             map(tag("hyper"), |_| TypeSpecifier::Hyper { unsigned: false }),
@@ -331,22 +339,39 @@ fn type_specifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             map(tag("double"), |_| TypeSpecifier::Double),
             map(tag("quadruple"), |_| TypeSpecifier::Quadruple),
             map(tag("bool"), |_| TypeSpecifier::Bool),
+            map(enum_type_spec, TypeSpecifier::EnumTypeSpec),
             // TODO: enum, struct, union type-specs
             map(identifier, TypeSpecifier::Identifier),
         )),
     )(i)
 }
 
-fn space<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+fn enum_type_spec<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
-) -> IResult<&'a str, &'a str, E> {
-    take_while(|c| " \t\r\n".contains(c))(i)
+) -> IResult<&'a str, EnumTypeSpec, E> {
+    map(
+        preceded(spc, preceded(tag("enum"), enum_body)),
+        |enum_body| EnumTypeSpec { enum_body },
+    )(i)
 }
 
-fn comment<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+fn enum_body<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
-) -> IResult<&'a str, (), E> {
-    nom_value((), tuple((tag("/*"), take_until("*/"), tag("*/"))))(i)
+) -> IResult<&'a str, EnumBody, E> {
+    map(
+        delimited(
+            preceded(spc, tag("{")),
+            preceded(
+                spc,
+                separated_list1(
+                    tag(","),
+                    separated_pair(identifier, preceded(spc, tag("=")), value),
+                ),
+            ),
+            preceded(spc, tag("}")),
+        ),
+        |variants| EnumBody { variants },
+    )(i)
 }
 
 #[cfg(test)]
@@ -366,11 +391,11 @@ mod test {
     fn test_comment() {
         assert_eq!(
             comment::<(_, ErrorKind)>("/* some comment */"),
-            Ok(("", ()))
+            Ok(("", "/* some comment */"))
         );
         assert_eq!(
             comment::<(_, ErrorKind)>("/* some comment */ somestuff"),
-            Ok((" somestuff", ()))
+            Ok((" somestuff", "/* some comment */"))
         );
     }
 
@@ -445,6 +470,20 @@ mod test {
         assert_eq!(
             type_specifier::<(_, ErrorKind)>("bool"),
             Ok(("", TypeSpecifier::Bool))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("enum { A = 1, B = 2 }"),
+            Ok((
+                "",
+                TypeSpecifier::EnumTypeSpec(EnumTypeSpec {
+                    enum_body: EnumBody {
+                        variants: vec![
+                            (Identifier("A"), Value::Constant(Constant(1))),
+                            (Identifier("B"), Value::Constant(Constant(2)))
+                        ]
+                    }
+                })
+            ))
         );
         assert_eq!(
             type_specifier::<(_, ErrorKind)>("some_other_identifier"),
