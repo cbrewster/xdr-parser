@@ -458,6 +458,21 @@ fn case_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     )(i)
 }
 
+fn constant_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, ConstantDef, E> {
+    map(
+        tuple((
+            preceded(tuple((spc, tag("const"))), identifier),
+            delimited(preceded(spc, tag("=")), constant, preceded(spc, tag(";"))),
+        )),
+        |(identifier, constant)| ConstantDef {
+            identifier,
+            constant,
+        },
+    )(i)
+}
+
 #[cfg(test)]
 mod test {
     use nom::{error::ErrorKind, Err};
@@ -750,6 +765,20 @@ mod test {
         assert_eq!(
             declaration::<(_, ErrorKind)>("void"),
             Ok(("", Declaration::Void))
+        );
+    }
+
+    #[test]
+    fn test_constant_def() {
+        assert_eq!(
+            constant_def::<(_, ErrorKind)>("const  my_thing = 10000;"),
+            Ok((
+                "",
+                ConstantDef {
+                    identifier: Identifier("my_thing"),
+                    constant: Constant(10000),
+                }
+            ))
         );
     }
 }
