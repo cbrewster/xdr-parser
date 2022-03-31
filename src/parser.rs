@@ -4,7 +4,7 @@ use nom::character::complete::{alpha1, alphanumeric1, one_of};
 use nom::combinator::{map, opt, recognize, value as nom_value};
 use nom::error::{ContextError, ParseError};
 use nom::multi::{many0, many0_count, many1, separated_list1};
-use nom::sequence::{delimited, pair, preceded, separated_pair, tuple};
+use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -97,12 +97,12 @@ pub struct UnionTypeSpec<'a> {
 pub struct UnionBody<'a> {
     pub switch_declaration: Declaration<'a>,
     pub case_specs: Vec<CaseDef<'a>>,
-    pub default_declaration: Declaration<'a>,
+    pub default_declaration: Option<Declaration<'a>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CaseDef<'a> {
-    pub values: Value<'a>,
+    pub value: Value<'a>,
     pub declaration: Declaration<'a>,
 }
 
@@ -340,7 +340,10 @@ fn type_specifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             map(tag("quadruple"), |_| TypeSpecifier::Quadruple),
             map(tag("bool"), |_| TypeSpecifier::Bool),
             map(enum_type_spec, TypeSpecifier::EnumTypeSpec),
-            // TODO: enum, struct, union type-specs
+            map(struct_type_spec, TypeSpecifier::StructTypeSpec),
+            map(union_type_spec, |u| {
+                TypeSpecifier::UnionTypeSpec(Box::new(u))
+            }),
             map(identifier, TypeSpecifier::Identifier),
         )),
     )(i)
@@ -371,6 +374,87 @@ fn enum_body<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             preceded(spc, tag("}")),
         ),
         |variants| EnumBody { variants },
+    )(i)
+}
+
+fn struct_type_spec<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, StructTypeSpec, E> {
+    map(
+        preceded(spc, preceded(tag("struct"), struct_body)),
+        |struct_body| StructTypeSpec { struct_body },
+    )(i)
+}
+
+fn struct_body<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, StructBody, E> {
+    map(
+        delimited(
+            preceded(spc, tag("{")),
+            many1(terminated(declaration, preceded(spc, tag(";")))),
+            preceded(spc, tag("}")),
+        ),
+        |declarations| StructBody { declarations },
+    )(i)
+}
+
+fn union_type_spec<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, UnionTypeSpec, E> {
+    map(
+        preceded(spc, preceded(tag("union"), union_body)),
+        |union_body| UnionTypeSpec { union_body },
+    )(i)
+}
+
+fn union_body<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, UnionBody, E> {
+    map(
+        tuple((
+            preceded(
+                preceded(spc, tag("switch")),
+                delimited(
+                    preceded(spc, tag("(")),
+                    declaration,
+                    preceded(spc, tag(")")),
+                ),
+            ),
+            delimited(
+                preceded(spc, tag("{")),
+                tuple((
+                    many1(case_def),
+                    opt(delimited(
+                        tuple((spc, tag("default"), spc, tag(":"))),
+                        declaration,
+                        preceded(spc, tag(";")),
+                    )),
+                )),
+                preceded(spc, tag("}")),
+            ),
+        )),
+        |(switch_declaration, (case_specs, default_declaration))| UnionBody {
+            switch_declaration,
+            case_specs,
+            default_declaration,
+        },
+    )(i)
+}
+
+fn case_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, CaseDef, E> {
+    map(
+        tuple((
+            preceded(tuple((spc, tag("case"))), value),
+            delimited(
+                preceded(spc, tag(":")),
+                declaration,
+                preceded(spc, tag(";")),
+            ),
+        )),
+        |(value, declaration)| CaseDef { value, declaration },
     )(i)
 }
 
@@ -485,6 +569,60 @@ mod test {
                 })
             ))
         );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("struct { int a; hyper b; }"),
+            Ok((
+                "",
+                TypeSpecifier::StructTypeSpec(StructTypeSpec {
+                    struct_body: StructBody {
+                        declarations: vec![
+                            Declaration::Regular {
+                                type_specifier: TypeSpecifier::Int { unsigned: false },
+                                identifier: Identifier("a"),
+                            },
+                            Declaration::Regular {
+                                type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                                identifier: Identifier("b"),
+                            },
+                        ]
+                    }
+                })
+            ))
+        );
+        assert_eq!(
+                type_specifier::<(_, ErrorKind)>("union switch ( int my_msg ) { case 1 : int thing; case 2 : hyper other_thing; default:string fallback<>;}"),
+                Ok((
+                    "",
+                    TypeSpecifier::UnionTypeSpec(Box::new(UnionTypeSpec {
+                        union_body: UnionBody {
+                            switch_declaration: Declaration::Regular {
+                                type_specifier: TypeSpecifier::Int { unsigned: false },
+                                identifier: Identifier("my_msg"),
+                            },
+                            case_specs: vec![
+                                CaseDef {
+                                    value: Value::Constant(Constant(1)),
+                                    declaration: Declaration::Regular {
+                                        type_specifier: TypeSpecifier::Int { unsigned: false },
+                                        identifier: Identifier("thing"),
+                                    },
+                                },
+                                CaseDef {
+                                    value: Value::Constant(Constant(2)),
+                                    declaration: Declaration::Regular {
+                                        type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                                        identifier: Identifier("other_thing"),
+                                    },
+                                }
+                            ],
+                            default_declaration: Some(Declaration::String {
+                                identifier: Identifier("fallback"),
+                                value: None,
+                            }),
+                        },
+                    })),
+                )),
+            );
         assert_eq!(
             type_specifier::<(_, ErrorKind)>("some_other_identifier"),
             Ok((
