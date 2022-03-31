@@ -1,9 +1,10 @@
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take};
-use nom::character::complete::{alpha1, alphanumeric1};
-use nom::combinator::{map, recognize};
-use nom::multi::many0_count;
-use nom::sequence::pair;
+use nom::bytes::complete::{tag, take_until, take_while};
+use nom::character::complete::{alpha1, alphanumeric1, one_of};
+use nom::combinator::{map, opt, recognize, value as nom_value};
+use nom::error::{ContextError, ParseError};
+use nom::multi::{many0_count, many1};
+use nom::sequence::{delimited, pair, preceded, tuple};
 use nom::IResult;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -12,44 +13,46 @@ pub struct Identifier<'a>(&'a str);
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Declaration<'a> {
     Regular {
-        type_specifier: Box<TypeSpecifier<'a>>,
+        type_specifier: TypeSpecifier<'a>,
         identifier: Identifier<'a>,
     },
     FixedArray {
-        type_specifier: Box<TypeSpecifier<'a>>,
+        type_specifier: TypeSpecifier<'a>,
         identifier: Identifier<'a>,
         value: Value<'a>,
-        opaque: bool,
     },
     VariableArray {
-        type_specifier: Box<TypeSpecifier<'a>>,
+        type_specifier: TypeSpecifier<'a>,
+        identifier: Identifier<'a>,
+        value: Option<Value<'a>>,
+    },
+    OpaqueFixedArray {
         identifier: Identifier<'a>,
         value: Value<'a>,
-        opaque: bool,
+    },
+    OpaqueVariableArray {
+        identifier: Identifier<'a>,
+        value: Option<Value<'a>>,
     },
     String {
         identifier: Identifier<'a>,
-        value: Value<'a>,
+        value: Option<Value<'a>>,
     },
     Pointer {
+        type_specifier: TypeSpecifier<'a>,
         identifier: Identifier<'a>,
-        value: Value<'a>,
     },
     Void,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Value<'a> {
-    Constant(Constant<'a>),
+    Constant(Constant),
     Identifier(Identifier<'a>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Constant<'a> {
-    Decimal(&'a str),
-    Hexidecimal(&'a str),
-    Octal(&'a str),
-}
+pub struct Constant(i64);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TypeSpecifier<'a> {
@@ -61,7 +64,7 @@ pub enum TypeSpecifier<'a> {
     Bool,
     EnumTypeSpec(EnumTypeSpec<'a>),
     StructTypeSpec(StructTypeSpec<'a>),
-    UnionTypeSpec(UnionTypeSpec<'a>),
+    UnionTypeSpec(Box<UnionTypeSpec<'a>>),
     Identifier(Identifier<'a>),
 }
 
@@ -106,7 +109,7 @@ pub struct CaseDef<'a> {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConstantDef<'a> {
     pub identifier: Identifier<'a>,
-    pub constant: Constant<'a>,
+    pub constant: Constant,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -139,11 +142,211 @@ pub struct Specification<'a> {
     pub definitions: Vec<Definition<'a>>,
 }
 
-fn identifier(input: &str) -> IResult<&str, Identifier> {
+fn declaration<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    preceded(
+        space,
+        alt((
+            map(tag("void"), |_| Declaration::Void),
+            declaration_opaque_fixed_array,
+            declaration_opaque_variable_array,
+            declaration_string,
+            declaration_fixed_array,
+            declaration_variable_array,
+            declaration_pointer,
+            declaration_regular,
+        )),
+    )(i)
+}
+
+fn declaration_regular<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(tuple((type_specifier, identifier)), |(t, i)| {
+        Declaration::Regular {
+            type_specifier: t,
+            identifier: i,
+        }
+    })(i)
+}
+
+fn declaration_fixed_array<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
     map(
-        recognize(pair(alpha1, many0_count(alt((alphanumeric1, tag("_")))))),
-        |ident| Identifier(ident),
-    )(input)
+        tuple((
+            type_specifier,
+            identifier,
+            delimited(preceded(space, tag("[")), value, preceded(space, tag("]"))),
+        )),
+        |(t, i, v)| Declaration::FixedArray {
+            type_specifier: t,
+            identifier: i,
+            value: v,
+        },
+    )(i)
+}
+
+fn declaration_variable_array<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(
+        tuple((
+            type_specifier,
+            identifier,
+            delimited(
+                preceded(space, tag("<")),
+                opt(value),
+                preceded(space, tag(">")),
+            ),
+        )),
+        |(t, i, v)| Declaration::VariableArray {
+            type_specifier: t,
+            identifier: i,
+            value: v,
+        },
+    )(i)
+}
+
+fn declaration_opaque_fixed_array<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(
+        tuple((
+            preceded(tag("opaque"), identifier),
+            delimited(preceded(space, tag("[")), value, preceded(space, tag("]"))),
+        )),
+        |(i, v)| Declaration::OpaqueFixedArray {
+            identifier: i,
+            value: v,
+        },
+    )(i)
+}
+
+fn declaration_opaque_variable_array<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(
+        tuple((
+            preceded(tag("opaque"), identifier),
+            delimited(
+                preceded(space, tag("<")),
+                opt(value),
+                preceded(space, tag(">")),
+            ),
+        )),
+        |(i, v)| Declaration::OpaqueVariableArray {
+            identifier: i,
+            value: v,
+        },
+    )(i)
+}
+
+fn declaration_string<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(
+        tuple((
+            preceded(tag("string"), identifier),
+            delimited(
+                preceded(space, tag("<")),
+                opt(value),
+                preceded(space, tag(">")),
+            ),
+        )),
+        |(i, v)| Declaration::String {
+            identifier: i,
+            value: v,
+        },
+    )(i)
+}
+
+fn declaration_pointer<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Declaration, E> {
+    map(
+        tuple((
+            type_specifier,
+            preceded(preceded(space, tag("*")), identifier),
+        )),
+        |(t, i)| Declaration::Pointer {
+            type_specifier: t,
+            identifier: i,
+        },
+    )(i)
+}
+
+fn value<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Value, E> {
+    preceded(
+        space,
+        alt((
+            map(constant, Value::Constant),
+            map(identifier, Value::Identifier),
+        )),
+    )(i)
+}
+
+fn constant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Constant, E> {
+    preceded(
+        space,
+        map(
+            recognize(preceded(opt(tag("-")), many1(one_of("0123456789")))),
+            |v: &str| Constant(v.parse().expect("failed to parse constant")),
+        ),
+    )(i)
+}
+
+fn identifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Identifier, E> {
+    preceded(
+        space,
+        map(
+            recognize(pair(alpha1, many0_count(alt((alphanumeric1, tag("_")))))),
+            |ident| Identifier(ident),
+        ),
+    )(i)
+}
+
+fn type_specifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, TypeSpecifier, E> {
+    preceded(
+        space,
+        alt((
+            map(tuple(((tag("unsigned")), space, tag("int"))), |_| {
+                TypeSpecifier::Int { unsigned: true }
+            }),
+            map(tag("int"), |_| TypeSpecifier::Int { unsigned: false }),
+            map(tuple(((tag("unsigned")), space, tag("hyper"))), |_| {
+                TypeSpecifier::Hyper { unsigned: true }
+            }),
+            map(tag("hyper"), |_| TypeSpecifier::Hyper { unsigned: false }),
+            map(tag("float"), |_| TypeSpecifier::Float),
+            map(tag("double"), |_| TypeSpecifier::Double),
+            map(tag("quadruple"), |_| TypeSpecifier::Quadruple),
+            map(tag("bool"), |_| TypeSpecifier::Bool),
+            // TODO: enum, struct, union type-specs
+            map(identifier, TypeSpecifier::Identifier),
+        )),
+    )(i)
+}
+
+fn space<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, &'a str, E> {
+    take_while(|c| " \t\r\n".contains(c))(i)
+}
+
+fn comment<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, (), E> {
+    nom_value((), tuple((tag("/*"), take_until("*/"), tag("*/"))))(i)
 }
 
 #[cfg(test)]
@@ -153,25 +356,223 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_identifier() {
-        assert_eq!(identifier("some_ident"), Ok(("", Identifier("some_ident"))));
+    fn test_space() {
+        assert_eq!(space::<(_, ErrorKind)>("   hi"), Ok(("hi", "   ")));
+        assert_eq!(space::<(_, ErrorKind)>("\t hi"), Ok(("hi", "\t ")));
+        assert_eq!(space::<(_, ErrorKind)>("\n\t hi"), Ok(("hi", "\n\t ")));
+    }
+
+    #[test]
+    fn test_comment() {
         assert_eq!(
-            identifier("some_ident more"),
+            comment::<(_, ErrorKind)>("/* some comment */"),
+            Ok(("", ()))
+        );
+        assert_eq!(
+            comment::<(_, ErrorKind)>("/* some comment */ somestuff"),
+            Ok((" somestuff", ()))
+        );
+    }
+
+    #[test]
+    fn test_value() {
+        assert_eq!(
+            value::<(_, ErrorKind)>("123"),
+            Ok(("", Value::Constant(Constant(123))))
+        );
+        assert_eq!(
+            value::<(_, ErrorKind)>("ident"),
+            Ok(("", Value::Identifier(Identifier("ident"))))
+        );
+    }
+
+    #[test]
+    fn test_identifier() {
+        assert_eq!(
+            identifier::<(_, ErrorKind)>("some_ident"),
+            Ok(("", Identifier("some_ident")))
+        );
+        assert_eq!(
+            identifier::<(_, ErrorKind)>("some_ident more"),
             Ok((" more", Identifier("some_ident")))
         );
         assert_eq!(
-            identifier("_invalid"),
-            Err(Err::Error(nom::error::Error {
-                input: "_invalid",
-                code: ErrorKind::Alpha
-            }))
+            identifier::<(_, ErrorKind)>("_invalid"),
+            Err(Err::Error(("_invalid", ErrorKind::Alpha)))
         );
         assert_eq!(
-            identifier("123no_number"),
-            Err(Err::Error(nom::error::Error {
-                input: "123no_number",
-                code: ErrorKind::Alpha
-            }))
+            identifier::<(_, ErrorKind)>("123no_number"),
+            Err(Err::Error(("123no_number", ErrorKind::Alpha)))
+        );
+    }
+
+    #[test]
+    fn test_constant() {
+        assert_eq!(constant::<(_, ErrorKind)>("123"), Ok(("", Constant(123))));
+        assert_eq!(constant::<(_, ErrorKind)>("-123"), Ok(("", Constant(-123))));
+    }
+
+    #[test]
+    fn test_type_specified() {
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("unsigned int"),
+            Ok(("", TypeSpecifier::Int { unsigned: true }))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("int"),
+            Ok(("", TypeSpecifier::Int { unsigned: false }))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("unsigned    hyper"),
+            Ok(("", TypeSpecifier::Hyper { unsigned: true }))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("hyper"),
+            Ok(("", TypeSpecifier::Hyper { unsigned: false }))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("float"),
+            Ok(("", TypeSpecifier::Float))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("double"),
+            Ok(("", TypeSpecifier::Double))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("quadruple"),
+            Ok(("", TypeSpecifier::Quadruple))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("bool"),
+            Ok(("", TypeSpecifier::Bool))
+        );
+        assert_eq!(
+            type_specifier::<(_, ErrorKind)>("some_other_identifier"),
+            Ok((
+                "",
+                TypeSpecifier::Identifier(Identifier("some_other_identifier"))
+            ))
+        );
+    }
+
+    #[test]
+    fn test_declaration() {
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("float my_float"),
+            Ok((
+                "",
+                Declaration::Regular {
+                    type_specifier: TypeSpecifier::Float,
+                    identifier: Identifier("my_float"),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("float my_floats [ 100 ]"),
+            Ok((
+                "",
+                Declaration::FixedArray {
+                    type_specifier: TypeSpecifier::Float,
+                    identifier: Identifier("my_floats"),
+                    value: Value::Constant(Constant(100)),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("float my_floats < 100 >"),
+            Ok((
+                "",
+                Declaration::VariableArray {
+                    type_specifier: TypeSpecifier::Float,
+                    identifier: Identifier("my_floats"),
+                    value: Some(Value::Constant(Constant(100))),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("float my_floats <  >"),
+            Ok((
+                "",
+                Declaration::VariableArray {
+                    type_specifier: TypeSpecifier::Float,
+                    identifier: Identifier("my_floats"),
+                    value: None,
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("opaque mysterious_data [ 100 ]"),
+            Ok((
+                "",
+                Declaration::OpaqueFixedArray {
+                    identifier: Identifier("mysterious_data"),
+                    value: Value::Constant(Constant(100)),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("opaque mysterious_data < 100 >"),
+            Ok((
+                "",
+                Declaration::OpaqueVariableArray {
+                    identifier: Identifier("mysterious_data"),
+                    value: Some(Value::Constant(Constant(100))),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("opaque mysterious_data <  >"),
+            Ok((
+                "",
+                Declaration::OpaqueVariableArray {
+                    identifier: Identifier("mysterious_data"),
+                    value: None,
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("string my_string < 100 >"),
+            Ok((
+                "",
+                Declaration::String {
+                    identifier: Identifier("my_string"),
+                    value: Some(Value::Constant(Constant(100))),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("string my_string <>"),
+            Ok((
+                "",
+                Declaration::String {
+                    identifier: Identifier("my_string"),
+                    value: None,
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("hyper * star"),
+            Ok((
+                "",
+                Declaration::Pointer {
+                    type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                    identifier: Identifier("star"),
+                }
+            ))
+        );
+
+        assert_eq!(
+            declaration::<(_, ErrorKind)>("void"),
+            Ok(("", Declaration::Void))
         );
     }
 }
