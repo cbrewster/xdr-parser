@@ -47,13 +47,12 @@ pub enum Declaration<'a> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Value<'a> {
-    Constant(Constant),
+    Constant(Constant<'a>),
     Identifier(Identifier<'a>),
 }
 
-// TODO: Use u64 or i64 instead of i128. Depending on if the parsed value is positive or negative.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Constant(i128);
+pub struct Constant<'a>(&'a str);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TypeSpecifier<'a> {
@@ -63,6 +62,7 @@ pub enum TypeSpecifier<'a> {
     Double,
     Quadruple,
     Bool,
+    Void,
     EnumTypeSpec(EnumTypeSpec<'a>),
     StructTypeSpec(StructTypeSpec<'a>),
     UnionTypeSpec(Box<UnionTypeSpec<'a>>),
@@ -110,7 +110,7 @@ pub struct CaseDef<'a> {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConstantDef<'a> {
     pub identifier: Identifier<'a>,
-    pub constant: Constant,
+    pub constant: Constant<'a>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -136,11 +136,34 @@ pub enum TypeDef<'a> {
 pub enum Definition<'a> {
     TypeDef(TypeDef<'a>),
     ConstantDef(ConstantDef<'a>),
+    ProgramDef(ProgramDef<'a>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Specification<'a> {
     pub definitions: Vec<Definition<'a>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ProgramDef<'a> {
+    pub identifier: Identifier<'a>,
+    pub version_defs: Vec<VersionDef<'a>>,
+    pub constant: Constant<'a>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VersionDef<'a> {
+    pub identifier: Identifier<'a>,
+    pub procedure_defs: Vec<ProcedureDef<'a>>,
+    pub constant: Constant<'a>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ProcedureDef<'a> {
+    pub type_specifier: TypeSpecifier<'a>,
+    pub identifier: Identifier<'a>,
+    pub type_specifiers: Vec<TypeSpecifier<'a>>,
+    pub constant: Constant<'a>,
 }
 
 fn space<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
@@ -318,17 +341,19 @@ fn constant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
                         alt((tag("0x"), tag("0X"))),
                         many1(one_of("0123456789abcdefABCDEF")),
                     ))),
-                    |v: &str| {
-                        // TODO: Remove replace, this allocates.
-                        Constant(
-                            i128::from_str_radix(&v.replace("0x", "").replace("0X", ""), 16)
-                                .expect(&format!("failed to parse constat: {}", v)),
-                        )
-                    },
+                    Constant,
+                ),
+                map(
+                    recognize(tuple((
+                        opt(tag("-")),
+                        alt((tag("0o"), tag("0O"))),
+                        many1(one_of("01234567")),
+                    ))),
+                    Constant,
                 ),
                 map(
                     recognize(preceded(opt(tag("-")), many1(one_of("0123456789")))),
-                    |v: &str| Constant(v.parse().expect("failed to parse constant")),
+                    Constant,
                 ),
             )),
         ),
@@ -370,6 +395,8 @@ fn identifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             "union",
             "unsigned",
             "void",
+            "program",
+            "version",
         ]
         .contains(&ident.0)
         {
@@ -397,10 +424,13 @@ fn type_specifier<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
                     TypeSpecifier::Hyper { unsigned: true }
                 }),
                 map(tag("hyper"), |_| TypeSpecifier::Hyper { unsigned: false }),
+                // TODO: This doesn't seem spec-compliant but, NFSv4 spec uses this...
+                map(tag("unsigned"), |_| TypeSpecifier::Int { unsigned: true }),
                 map(tag("float"), |_| TypeSpecifier::Float),
                 map(tag("double"), |_| TypeSpecifier::Double),
                 map(tag("quadruple"), |_| TypeSpecifier::Quadruple),
                 map(tag("bool"), |_| TypeSpecifier::Bool),
+                map(tag("void"), |_| TypeSpecifier::Void),
                 map(enum_type_spec, TypeSpecifier::EnumTypeSpec),
                 map(struct_type_spec, TypeSpecifier::StructTypeSpec),
                 map(union_type_spec, |u| {
@@ -559,25 +589,37 @@ fn type_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             spc,
             alt((
                 map(
-                    delimited(tag("typedef"), declaration, tag(";")),
+                    delimited(tag("typedef"), declaration, preceded(spc, tag(";"))),
                     |declaration| TypeDef::TypeDef { declaration },
                 ),
                 map(
-                    delimited(tag("enum"), tuple((identifier, enum_body)), tag(";")),
+                    delimited(
+                        tag("enum"),
+                        tuple((identifier, enum_body)),
+                        preceded(spc, tag(";")),
+                    ),
                     |(identifier, enum_body)| TypeDef::Enum {
                         identifier,
                         enum_body,
                     },
                 ),
                 map(
-                    delimited(tag("struct"), tuple((identifier, struct_body)), tag(";")),
+                    delimited(
+                        tag("struct"),
+                        tuple((identifier, struct_body)),
+                        preceded(spc, tag(";")),
+                    ),
                     |(identifier, struct_body)| TypeDef::Struct {
                         identifier,
                         struct_body,
                     },
                 ),
                 map(
-                    delimited(tag("union"), tuple((identifier, union_body)), tag(";")),
+                    delimited(
+                        tag("union"),
+                        tuple((identifier, union_body)),
+                        preceded(spc, tag(";")),
+                    ),
                     |(identifier, union_body)| TypeDef::Union {
                         identifier,
                         union_body,
@@ -596,6 +638,7 @@ fn definition<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
         alt((
             map(type_def, Definition::TypeDef),
             map(constant_def, Definition::ConstantDef),
+            map(program_def, Definition::ProgramDef),
         )),
     )(i)
 }
@@ -606,6 +649,80 @@ fn specification<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     map(many0(delimited(spc, definition, spc)), |definitions| {
         Specification { definitions }
     })(i)
+}
+
+fn program_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, ProgramDef, E> {
+    context(
+        "program_def",
+        map(
+            tuple((
+                preceded(preceded(spc, tag("program")), identifier),
+                delimited(
+                    preceded(spc, tag("{")),
+                    many1(version_def),
+                    preceded(spc, tag("}")),
+                ),
+                delimited(preceded(spc, tag("=")), constant, preceded(spc, tag(";"))),
+            )),
+            |(identifier, version_defs, constant)| ProgramDef {
+                identifier,
+                version_defs,
+                constant,
+            },
+        ),
+    )(i)
+}
+
+fn version_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, VersionDef, E> {
+    context(
+        "version_def",
+        map(
+            tuple((
+                preceded(preceded(spc, tag("version")), identifier),
+                delimited(
+                    preceded(spc, tag("{")),
+                    many1(procedure_def),
+                    preceded(spc, tag("}")),
+                ),
+                delimited(preceded(spc, tag("=")), constant, preceded(spc, tag(";"))),
+            )),
+            |(identifier, procedure_defs, constant)| VersionDef {
+                identifier,
+                procedure_defs,
+                constant,
+            },
+        ),
+    )(i)
+}
+
+fn procedure_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, ProcedureDef, E> {
+    context(
+        "procedure_def",
+        map(
+            tuple((
+                type_specifier,
+                identifier,
+                delimited(
+                    preceded(spc, tag("(")),
+                    separated_list1(tag(","), type_specifier),
+                    preceded(spc, tag(")")),
+                ),
+                delimited(preceded(spc, tag("=")), constant, preceded(spc, tag(";"))),
+            )),
+            |(type_specifier, identifier, type_specifiers, constant)| ProcedureDef {
+                identifier,
+                type_specifier,
+                type_specifiers,
+                constant,
+            },
+        ),
+    )(i)
 }
 
 #[cfg(test)]
@@ -640,7 +757,7 @@ mod test {
     fn test_value() {
         assert_eq!(
             value::<(_, ErrorKind)>("123"),
-            Ok(("", Value::Constant(Constant(123))))
+            Ok(("", Value::Constant(Constant("123"))))
         );
         assert_eq!(
             value::<(_, ErrorKind)>("ident"),
@@ -674,9 +791,12 @@ mod test {
 
     #[test]
     fn test_constant() {
-        assert_eq!(constant::<(_, ErrorKind)>("123"), Ok(("", Constant(123))));
-        assert_eq!(constant::<(_, ErrorKind)>("-123"), Ok(("", Constant(-123))));
-        assert_eq!(constant::<(_, ErrorKind)>("0x1"), Ok(("", Constant(1))));
+        assert_eq!(constant::<(_, ErrorKind)>("123"), Ok(("", Constant("123"))));
+        assert_eq!(
+            constant::<(_, ErrorKind)>("-123"),
+            Ok(("", Constant("-123")))
+        );
+        assert_eq!(constant::<(_, ErrorKind)>("0x1"), Ok(("", Constant("0x1"))));
     }
 
     #[test]
@@ -720,8 +840,8 @@ mod test {
                 TypeSpecifier::EnumTypeSpec(EnumTypeSpec {
                     enum_body: EnumBody {
                         variants: vec![
-                            (Identifier("A"), Value::Constant(Constant(1))),
-                            (Identifier("B"), Value::Constant(Constant(2)))
+                            (Identifier("A"), Value::Constant(Constant("1"))),
+                            (Identifier("B"), Value::Constant(Constant("2")))
                         ]
                     }
                 })
@@ -759,14 +879,14 @@ mod test {
                             },
                             case_specs: vec![
                                 CaseDef {
-                                    values: vec![Value::Constant(Constant(1))],
+                                    values: vec![Value::Constant(Constant("1"))],
                                     declaration: Declaration::Regular {
                                         type_specifier: TypeSpecifier::Int { unsigned: false },
                                         identifier: Identifier("thing"),
                                     },
                                 },
                                 CaseDef {
-                                    values: vec![Value::Constant(Constant(2))],
+                                    values: vec![Value::Constant(Constant("2"))],
                                     declaration: Declaration::Regular {
                                         type_specifier: TypeSpecifier::Hyper { unsigned: false },
                                         identifier: Identifier("other_thing"),
@@ -810,7 +930,7 @@ mod test {
                 Declaration::FixedArray {
                     type_specifier: TypeSpecifier::Float,
                     identifier: Identifier("my_floats"),
-                    value: Value::Constant(Constant(100)),
+                    value: Value::Constant(Constant("100")),
                 }
             ))
         );
@@ -822,7 +942,7 @@ mod test {
                 Declaration::VariableArray {
                     type_specifier: TypeSpecifier::Float,
                     identifier: Identifier("my_floats"),
-                    value: Some(Value::Constant(Constant(100))),
+                    value: Some(Value::Constant(Constant("100"))),
                 }
             ))
         );
@@ -845,7 +965,7 @@ mod test {
                 "",
                 Declaration::OpaqueFixedArray {
                     identifier: Identifier("mysterious_data"),
-                    value: Value::Constant(Constant(100)),
+                    value: Value::Constant(Constant("100")),
                 }
             ))
         );
@@ -856,7 +976,7 @@ mod test {
                 "",
                 Declaration::OpaqueVariableArray {
                     identifier: Identifier("mysterious_data"),
-                    value: Some(Value::Constant(Constant(100))),
+                    value: Some(Value::Constant(Constant("100"))),
                 }
             ))
         );
@@ -878,7 +998,7 @@ mod test {
                 "",
                 Declaration::String {
                     identifier: Identifier("my_string"),
-                    value: Some(Value::Constant(Constant(100))),
+                    value: Some(Value::Constant(Constant("100"))),
                 }
             ))
         );
@@ -919,7 +1039,7 @@ mod test {
                 "",
                 ConstantDef {
                     identifier: Identifier("my_thing"),
-                    constant: Constant(10000),
+                    constant: Constant("10000"),
                 }
             ))
         );
@@ -935,8 +1055,8 @@ mod test {
                     identifier: Identifier("cool_enum"),
                     enum_body: EnumBody {
                         variants: vec![
-                            (Identifier("A"), Value::Constant(Constant(1))),
-                            (Identifier("B"), Value::Constant(Constant(2)))
+                            (Identifier("A"), Value::Constant(Constant("1"))),
+                            (Identifier("B"), Value::Constant(Constant("2")))
                         ]
                     }
                 }
@@ -964,40 +1084,97 @@ mod test {
             ))
         );
         assert_eq!(
-                type_def::<(_, ErrorKind)>("union cool_union switch ( int my_msg ) { case 1 : int thing; case 2 : hyper other_thing; default:string fallback<>;};"),
-                Ok((
-                    "",
-                    TypeDef::Union {
-                        identifier: Identifier("cool_union"),
-                        union_body: UnionBody {
-                            switch_declaration: Declaration::Regular {
-                                type_specifier: TypeSpecifier::Int { unsigned: false },
-                                identifier: Identifier("my_msg"),
-                            },
-                            case_specs: vec![
-                                CaseDef {
-                                    values: vec![Value::Constant(Constant(1))],
-                                    declaration: Declaration::Regular {
-                                        type_specifier: TypeSpecifier::Int { unsigned: false },
-                                        identifier: Identifier("thing"),
-                                    },
-                                },
-                                CaseDef {
-                                    values: vec![Value::Constant(Constant(2))],
-                                    declaration: Declaration::Regular {
-                                        type_specifier: TypeSpecifier::Hyper { unsigned: false },
-                                        identifier: Identifier("other_thing"),
-                                    },
-                                }
-                            ],
-                            default_declaration: Some(Declaration::String {
-                                identifier: Identifier("fallback"),
-                                value: None,
-                            }),
+            type_def::<(_, ErrorKind)>("union cool_union switch ( int my_msg ) { case 1 : int thing; case 2 : hyper other_thing; default:string fallback<>;} ;"),
+            Ok((
+                "",
+                TypeDef::Union {
+                    identifier: Identifier("cool_union"),
+                    union_body: UnionBody {
+                        switch_declaration: Declaration::Regular {
+                            type_specifier: TypeSpecifier::Int { unsigned: false },
+                            identifier: Identifier("my_msg"),
                         },
+                        case_specs: vec![
+                            CaseDef {
+                                values: vec![Value::Constant(Constant("1"))],
+                                declaration: Declaration::Regular {
+                                    type_specifier: TypeSpecifier::Int { unsigned: false },
+                                    identifier: Identifier("thing"),
+                                },
+                            },
+                            CaseDef {
+                                values: vec![Value::Constant(Constant("2"))],
+                                declaration: Declaration::Regular {
+                                    type_specifier: TypeSpecifier::Hyper { unsigned: false },
+                                    identifier: Identifier("other_thing"),
+                                },
+                            }
+                        ],
+                        default_declaration: Some(Declaration::String {
+                            identifier: Identifier("fallback"),
+                            value: None,
+                        }),
                     },
-                )),
-            );
+                },
+            )),
+        );
+    }
+
+    #[test]
+    fn test_version_def() {
+        let procedure_def = ProcedureDef {
+            type_specifier: TypeSpecifier::Identifier(Identifier("uint64_t")),
+            identifier: Identifier("poke_bear"),
+            type_specifiers: vec![
+                TypeSpecifier::Identifier(Identifier("myargs")),
+                TypeSpecifier::Identifier(Identifier("otherargs")),
+            ],
+            constant: Constant("1"),
+        };
+        assert_eq!(
+            version_def::<VerboseError<&str>>(
+                "version RPC1 { uint64_t poke_bear (myargs, otherargs) = 1 ; } = 1;"
+            ),
+            Ok((
+                "",
+                VersionDef {
+                    identifier: Identifier("RPC1"),
+                    procedure_defs: vec![procedure_def],
+                    constant: Constant("1"),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn test_program_def() {
+        let procedure_def = ProcedureDef {
+            type_specifier: TypeSpecifier::Identifier(Identifier("uint64_t")),
+            identifier: Identifier("poke_bear"),
+            type_specifiers: vec![
+                TypeSpecifier::Identifier(Identifier("myargs")),
+                TypeSpecifier::Identifier(Identifier("otherargs")),
+            ],
+            constant: Constant("1"),
+        };
+        let version_def = VersionDef {
+            identifier: Identifier("RPC1"),
+            procedure_defs: vec![procedure_def],
+            constant: Constant("1"),
+        };
+        assert_eq!(
+            program_def::<VerboseError<&str>>(
+                "program NET_BEAR { version RPC1 { uint64_t poke_bear (myargs, otherargs) = 1 ; } = 1; } = 1;"
+            ),
+            Ok((
+                "",
+                ProgramDef {
+                    identifier: Identifier("NET_BEAR"),
+                    version_defs: vec![version_def],
+                    constant: Constant("1"),
+                }
+            ))
+        );
     }
 
     #[test]
