@@ -630,27 +630,6 @@ fn type_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     )(i)
 }
 
-fn definition<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
-    i: &'a str,
-) -> IResult<&'a str, Definition, E> {
-    context(
-        "definition",
-        alt((
-            map(type_def, Definition::TypeDef),
-            map(constant_def, Definition::ConstantDef),
-            map(program_def, Definition::ProgramDef),
-        )),
-    )(i)
-}
-
-fn specification<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
-    i: &'a str,
-) -> IResult<&'a str, Specification, E> {
-    map(many0(delimited(spc, definition, spc)), |definitions| {
-        Specification { definitions }
-    })(i)
-}
-
 fn program_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
     i: &'a str,
 ) -> IResult<&'a str, ProgramDef, E> {
@@ -723,6 +702,27 @@ fn procedure_def<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
             },
         ),
     )(i)
+}
+
+fn definition<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Definition, E> {
+    context(
+        "definition",
+        alt((
+            map(type_def, Definition::TypeDef),
+            map(constant_def, Definition::ConstantDef),
+            map(program_def, Definition::ProgramDef),
+        )),
+    )(i)
+}
+
+pub(crate) fn specification<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
+    i: &'a str,
+) -> IResult<&'a str, Specification, E> {
+    map(many0(delimited(spc, definition, spc)), |definitions| {
+        Specification { definitions }
+    })(i)
 }
 
 #[cfg(test)]
@@ -1191,3 +1191,4 @@ mod test {
         debug_assert_eq!(left, "");
     }
 }
+
