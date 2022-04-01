@@ -1183,4 +1183,11 @@ mod test {
         let (left, _parsed) = specification::<(_, ErrorKind)>(nfsv4_x).expect("parses nfsv4 spec");
         debug_assert_eq!(left, "");
     }
+
+    #[test]
+    fn test_file() {
+        let file = include_str!("../assets/file.x");
+        let (left, _parsed) = specification::<(_, ErrorKind)>(file).expect("parses file spec");
+        debug_assert_eq!(left, "");
+    }
 }
