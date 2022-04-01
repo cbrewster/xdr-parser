@@ -332,30 +332,25 @@ fn constant<'a, E: ParseError<&'a str> + ContextError<&'a str>>(
 ) -> IResult<&'a str, Constant, E> {
     context(
         "constant",
-        preceded(
-            spc,
-            alt((
-                map(
-                    recognize(tuple((
-                        opt(tag("-")),
-                        alt((tag("0x"), tag("0X"))),
-                        many1(one_of("0123456789abcdefABCDEF")),
-                    ))),
-                    Constant,
-                ),
-                map(
-                    recognize(tuple((
-                        opt(tag("-")),
-                        alt((tag("0o"), tag("0O"))),
-                        many1(one_of("01234567")),
-                    ))),
-                    Constant,
-                ),
-                map(
-                    recognize(preceded(opt(tag("-")), many1(one_of("0123456789")))),
-                    Constant,
-                ),
-            )),
+        map(
+            preceded(
+                spc,
+                recognize(preceded(
+                    opt(tag("-")),
+                    alt((
+                        recognize(tuple((
+                            alt((tag("0x"), tag("0X"))),
+                            many1(one_of("0123456789abcdefABCDEF")),
+                        ))),
+                        recognize(tuple((
+                            alt((tag("0o"), tag("0O"))),
+                            many1(one_of("01234567")),
+                        ))),
+                        recognize(many1(one_of("0123456789"))),
+                    )),
+                )),
+            ),
+            Constant,
         ),
     )(i)
 }
@@ -1191,4 +1186,3 @@ mod test {
         debug_assert_eq!(left, "");
     }
 }
-
